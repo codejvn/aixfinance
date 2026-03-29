@@ -13,7 +13,7 @@ from backtester import run_backtest
 
 # ─── Page config ─────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="Kappa",
+    page_title="KappaPortfolios",
     page_icon="📈",
     layout="wide",
 )
@@ -148,7 +148,7 @@ st.markdown("""
 <div style="padding: 1.75rem 0 0.5rem 0;">
   <h1 style="font-size:2rem; font-weight:700; margin-bottom:0.2rem; color:#F0F0F0;
              letter-spacing:-0.01em;">
-    Kappa
+    KappaPortfolios
   </h1>
   <p style="color:#9CA3AF; font-size:0.95rem; margin:0;">
     Actor-Critic Multi-Agent Trading Portfolio
