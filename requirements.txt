@@ -1,0 +1,8 @@
+streamlit
+openai
+anthropic
+tavily-python
+yfinance
+pandas
+plotly
+python-dotenv
