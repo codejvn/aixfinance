@@ -24,6 +24,12 @@ We are building a consumer-facing web application that generates risk-adjusted t
 6. **Backtesting & Simulation (`backtester.py`):** Run the final JSON portfolio against historical data to simulate paper-trading performance.
 7. **Performance Dashboard (`app.py`):** Use Plotly to display equity curves, win rates, max drawdown, and a final written LLM insight summarizing the bot's performance.
 
+## Strict Coding Rules - HYBRID API ARCHITECTURE (CRITICAL)
+1. **Dual SDKs:** We are using a hybrid API approach. You MUST use the `anthropic` SDK for all Claude models, and the `openai` SDK for all GPT models.
+2. **Claude Initialization:** Initialize Anthropic normally using `os.getenv("ANTHROPIC_API_KEY")`.
+3. **GPT Initialization (Dedalus Proxy):** Initialize the OpenAI client to point to Dedalus Labs: `client = OpenAI(api_key=os.getenv("DEDALUS_API_KEY"), base_url=os.getenv("DEDALUS_BASE_URL"))`.
+4. **JSON Strictness:** Ensure all agent outputs are strictly parseable JSON. Do not allow conversational filler in the final outputs.
+
 ## Strict Coding Rules
 1. **Never Refactor Without Asking:** Do not rewrite working functions just to make them "cleaner." We are moving fast.
 2. **Robust Error Handling:** API calls (Tavily, OpenAI, Anthropic) MUST have try/except blocks so the UI doesn't crash if an endpoint times out. Return mock JSON if an API fails.
