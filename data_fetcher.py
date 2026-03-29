@@ -106,13 +106,21 @@ def fetch_news_newsapi(theme: str, max_results: int = 10) -> list[dict]:
         return []
 
 
-def fetch_news(theme: str, max_results: int = 10) -> list[dict]:
+def fetch_news(theme: str, max_results: int = 10, tickers: list = None) -> list[dict]:
     """
     Fetch and merge news from Tavily + NewsAPI.
+    If tickers are provided, the search query includes the specific ticker names
+    so results are relevant to both the theme and the LLM-chosen assets.
     Deduplicates by title. Falls back to mock data if both sources fail.
     """
-    tavily_articles = fetch_news_tavily(theme, max_results)
-    newsapi_articles = fetch_news_newsapi(theme, max_results)
+    # Build an enriched query: theme + up to 4 ticker names (strip -USD suffix for readability)
+    query = theme
+    if tickers:
+        ticker_names = [t.replace("-USD", "") for t in tickers[:4]]
+        query = f"{theme} {' '.join(ticker_names)}"
+
+    tavily_articles = fetch_news_tavily(query, max_results)
+    newsapi_articles = fetch_news_newsapi(query, max_results)
 
     # Merge and deduplicate by lowercased title
     seen_titles = set()
@@ -265,12 +273,20 @@ def build_context_block(theme: str, risk_tolerance: int,
 
 
 # ─── High-level convenience function ─────────────────────────────────────────
-def gather_all_data(theme: str, risk_tolerance: int) -> dict:
+def gather_all_data(theme: str, risk_tolerance: int, tickers: list = None,
+                    articles: list = None, lookback_days: int = 90) -> dict:
     """
     Entry point for the pipeline:  theme + risk_tolerance → context block.
+    If tickers is provided (e.g. from agents.discover_tickers()), use those;
+    otherwise fall back to the hardcoded THEME_TICKERS map.
+    If articles is provided (already fetched), skip the news fetch to avoid a duplicate API call.
+    lookback_days controls how much price history is fetched for the agent context
+    and should match the user's selected investment horizon.
     """
-    tickers = get_tickers_for_theme(theme)
-    articles = fetch_news(theme)
-    price_data = fetch_price_data(tickers)
+    if not tickers:
+        tickers = get_tickers_for_theme(theme)
+    if articles is None:
+        articles = fetch_news(theme)
+    price_data = fetch_price_data(tickers, lookback_days=lookback_days)
     context = build_context_block(theme, risk_tolerance, articles, price_data)
     return context

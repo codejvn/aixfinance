@@ -3,3 +3,4 @@
 .env.example
 pycache/
 .venv/ 
+secrets.toml

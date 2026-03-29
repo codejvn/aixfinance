@@ -1,7 +1,15 @@
 import streamlit as st
 import pandas as pd
 
-from data_fetcher import gather_all_data
+import plotly.graph_objects as go
+
+from data_fetcher import gather_all_data, fetch_news
+from agents import (discover_tickers, generate_performance_insight,
+                    run_claude_actor, run_gpt_actor,
+                    run_gpt_critic, run_claude_critic, run_risk_analyst,
+                    update_policy_from_backtest)
+from policy import load_policy
+from backtester import run_backtest
 
 # ─── Page config ─────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -223,10 +231,17 @@ if submitted:
         st.error("Please describe your investment theme before running.")
     else:
         risk_tolerance = RISK_MAP[risk_label]
+        lookback_days  = HORIZON_MAP[horizon_label]
         with st.spinner("Gathering market intelligence…"):
-            context = gather_all_data(theme, risk_tolerance)
+            # Pass 1: Claude picks the best tickers for this theme
+            tickers = discover_tickers(theme)
+            # Pass 2: fetch news for the theme + those specific tickers
+            articles = fetch_news(theme, tickers=tickers)
+            # Pass 3: fetch price data (using the correct investment horizon) + build context
+            context = gather_all_data(theme, risk_tolerance, tickers=tickers,
+                                      articles=articles, lookback_days=lookback_days)
             context["user_preferences"] = ", ".join(selected_prefs)
-            context["lookback_days"]     = HORIZON_MAP[horizon_label]
+            context["lookback_days"]     = lookback_days
         st.session_state["context"]        = context
         st.session_state["theme"]          = theme
         st.session_state["risk_tolerance"] = risk_tolerance
@@ -302,14 +317,95 @@ if "context" in st.session_state:
     # ── Section 3: Agent Arena ────────────────────────────────────────────────
     st.markdown('<div class="section-heading"><h3 style="margin:0;color:#F0F0F0;">Agent Arena</h3></div>',
                 unsafe_allow_html=True)
-    st.markdown("""
-    <div style="background:#1A1A1A; border:1px solid #2C5F2E; border-radius:8px;
-                padding:2rem; text-align:center; margin-bottom:1rem;">
-      <p style="color:#9CA3AF; margin:0; font-size:0.95rem;">
-        Agent logic coming soon — the actor-critic ensemble will run here.
-      </p>
-    </div>
-    """, unsafe_allow_html=True)
+
+    if st.button("🤖 Run Agent Arena", type="primary", use_container_width=False):
+        ctx = st.session_state["context"]
+        with st.status("Running Actor-Critic Arena…", expanded=True) as status:
+            st.write("🔵 Claude Actor proposing trades…")
+            claude_actor = run_claude_actor(ctx)
+
+            st.write("🟢 GPT Actor proposing trades…")
+            gpt_actor = run_gpt_actor(ctx)
+
+            st.write("🔴 GPT Critic reviewing Claude's proposal…")
+            gpt_critic = run_gpt_critic(claude_actor, ctx)
+
+            st.write("🟡 Claude Critic reviewing GPT's proposal…")
+            claude_critic = run_claude_critic(gpt_actor, ctx)
+
+            st.write("⚖️ Risk Analyst synthesising final portfolio…")
+            arena_result = run_risk_analyst(ctx, claude_actor, gpt_actor, claude_critic, gpt_critic)
+            arena_result["debug"] = {
+                "claude_actor":  claude_actor,
+                "gpt_actor":     gpt_actor,
+                "gpt_critic":    gpt_critic,
+                "claude_critic": claude_critic,
+            }
+            status.update(label="Arena complete!", state="complete", expanded=False)
+
+        st.session_state["arena_result"] = arena_result
+
+    if "arena_result" in st.session_state:
+        result = st.session_state["arena_result"]
+        debug  = result.get("debug", {})
+
+        # ── Final portfolio ───────────────────────────────────────────────
+        st.markdown("<p style='color:#9CA3AF; font-size:0.8rem; text-transform:uppercase; "
+                    "letter-spacing:0.08em; margin-bottom:0.5rem;'>Final Portfolio</p>",
+                    unsafe_allow_html=True)
+
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Risk Level",  result.get("risk_level", "—"))
+        col2.metric("Confidence",  f"{result.get('confidence_score', 0):.0%}")
+        col3.metric("Positions",   len(result.get("portfolio", [])))
+
+        st.markdown(f"<p style='color:#9CA3AF; font-size:0.9rem;'>{result.get('overall_strategy', '')}</p>",
+                    unsafe_allow_html=True)
+
+        portfolio = result.get("portfolio", [])
+        if portfolio:
+            df = pd.DataFrame(portfolio)
+            cols = ["asset", "direction", "leverage", "stop_loss_pct", "allocation_pct", "rationale"]
+            df = df[[c for c in cols if c in df.columns]]
+            df.columns = [c.replace("_", " ").title() for c in df.columns]
+            st.dataframe(df, use_container_width=True, hide_index=True)
+
+        st.divider()
+
+        # ── Actor proposals (collapsed) ───────────────────────────────────
+        col_a, col_b = st.columns(2)
+        with col_a:
+            with st.expander("🔵 Claude Actor", expanded=False):
+                ca = debug.get("claude_actor", {})
+                st.caption(ca.get("thesis", ""))
+                if ca.get("proposed_trades"):
+                    st.dataframe(pd.DataFrame(ca["proposed_trades"]), use_container_width=True, hide_index=True)
+
+        with col_b:
+            with st.expander("🟢 GPT Actor", expanded=False):
+                ga = debug.get("gpt_actor", {})
+                st.caption(ga.get("thesis", ""))
+                if ga.get("proposed_trades"):
+                    st.dataframe(pd.DataFrame(ga["proposed_trades"]), use_container_width=True, hide_index=True)
+
+        # ── Critic verdicts (collapsed) ───────────────────────────────────
+        col_c, col_d = st.columns(2)
+        with col_c:
+            with st.expander("🔴 GPT Critic (vs Claude)", expanded=False):
+                gc = debug.get("gpt_critic", {})
+                st.caption(gc.get("verdict_rationale", ""))
+                if gc.get("critiques"):
+                    st.dataframe(pd.DataFrame(gc["critiques"]), use_container_width=True, hide_index=True)
+
+        with col_d:
+            with st.expander("🟡 Claude Critic (vs GPT)", expanded=False):
+                cc = debug.get("claude_critic", {})
+                st.caption(cc.get("verdict_rationale", ""))
+                if cc.get("critiques"):
+                    st.dataframe(pd.DataFrame(cc["critiques"]), use_container_width=True, hide_index=True)
+
+        with st.expander("Raw arena output (JSON)"):
+            st.json({k: v for k, v in result.items() if k != "debug"})
 
     st.markdown("<div style='height:1rem'></div>", unsafe_allow_html=True)
     st.divider()
@@ -317,12 +413,146 @@ if "context" in st.session_state:
     # ── Section 4: Backtest & Results ─────────────────────────────────────────
     st.markdown('<div class="section-heading"><h3 style="margin:0;color:#F0F0F0;">Backtest & Results</h3></div>',
                 unsafe_allow_html=True)
-    st.markdown("""
-    <div style="background:#1A1A1A; border:1px solid #2C5F2E; border-radius:8px;
-                padding:2rem; text-align:center; margin-bottom:1rem;">
-      <p style="color:#9CA3AF; margin:0; font-size:0.95rem;">
-        Equity curves and performance metrics will appear here once the agents
-        have generated a portfolio.
-      </p>
-    </div>
-    """, unsafe_allow_html=True)
+
+    if "arena_result" not in st.session_state:
+        st.markdown("""
+        <div style="background:#1A1A1A; border:1px solid #2C5F2E; border-radius:8px;
+                    padding:2rem; text-align:center; margin-bottom:1rem;">
+          <p style="color:#9CA3AF; margin:0; font-size:0.95rem;">
+            Run the Agent Arena first to generate a portfolio.
+          </p>
+        </div>
+        """, unsafe_allow_html=True)
+    else:
+        if st.button("📉 Run Backtest & Generate Insight", type="primary", use_container_width=False):
+            portfolio = st.session_state["arena_result"].get("portfolio", [])
+            articles  = st.session_state["context"].get("news", {}).get("articles", [])
+            lookback  = st.session_state["context"].get("lookback_days", 90)
+            with st.spinner("Simulating portfolio performance…"):
+                bt = run_backtest(portfolio, articles=articles, lookback_days=lookback)
+                st.session_state["backtest"] = bt
+            with st.spinner("Generating performance insight…"):
+                insight = generate_performance_insight(
+                    portfolio,
+                    bt["metrics"],
+                    st.session_state["context"],
+                )
+                st.session_state["insight"] = insight
+            with st.spinner("Updating policy rulebook…"):
+                policy_change = update_policy_from_backtest(
+                    st.session_state["context"].get("theme", ""),
+                    portfolio,
+                    bt["metrics"],
+                )
+                st.session_state["policy_change"] = policy_change
+
+        if "backtest" in st.session_state:
+            bt      = st.session_state["backtest"]
+            metrics = bt["metrics"]
+
+            # ── Metrics row ───────────────────────────────────────────────
+            c1, c2, c3, c4 = st.columns(4)
+            ret = metrics["total_return_pct"]
+            c1.metric("Total Return",  f"{ret:+.2f}%",
+                      delta=f"{ret:+.2f}%", delta_color="normal")
+            c2.metric("Max Drawdown",  f"{metrics['max_drawdown_pct']:.2f}%")
+            c3.metric("Win Rate",      f"{metrics['win_rate_pct']:.1f}%")
+            c4.metric("Sharpe Ratio",  f"{metrics['sharpe_ratio']:.2f}")
+
+            st.markdown(
+                f"<p style='color:#9CA3AF; font-size:0.85rem;'>"
+                f"${metrics['initial_capital']:,.0f} → "
+                f"<strong style='color:#F0F0F0;'>${metrics['final_capital']:,.2f}</strong>"
+                f" over {metrics['trading_days']} trading days</p>",
+                unsafe_allow_html=True,
+            )
+
+            # ── Equity curve ──────────────────────────────────────────────
+            eq   = bt["equity_curve"]
+            dates  = [p["date"]  for p in eq]
+            values = [p["value"] for p in eq]
+
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(
+                x=dates, y=values,
+                mode="lines",
+                line=dict(color="#3D7A40", width=2),
+                fill="tozeroy",
+                fillcolor="rgba(61,122,64,0.08)",
+            ))
+            fig.update_layout(
+                paper_bgcolor="#1A1A1A",
+                plot_bgcolor="#1A1A1A",
+                font=dict(color="#F0F0F0"),
+                margin=dict(l=0, r=0, t=20, b=0),
+                xaxis=dict(gridcolor="#2A2A2A", color="#9CA3AF", showgrid=True),
+                yaxis=dict(gridcolor="#2A2A2A", color="#9CA3AF",
+                           tickprefix="$", showgrid=True),
+                showlegend=False,
+                height=320,
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+            # ── Per-position breakdown ────────────────────────────────────
+            pos_results = bt.get("position_results", [])
+            if pos_results:
+                st.markdown("<p style='color:#9CA3AF; font-size:0.8rem; text-transform:uppercase; "
+                            "letter-spacing:0.08em; margin-bottom:0.5rem;'>Position Breakdown</p>",
+                            unsafe_allow_html=True)
+                df_pos = pd.DataFrame(pos_results)
+                df_pos.columns = [c.replace("_", " ").title() for c in df_pos.columns]
+                st.dataframe(df_pos, use_container_width=True, hide_index=True)
+
+            # ── LLM insight ───────────────────────────────────────────────
+            if "insight" in st.session_state:
+                st.markdown("<div style='height:0.5rem'></div>", unsafe_allow_html=True)
+                st.markdown(
+                    f"<div style='background:#1A1A1A; border:1px solid #2C5F2E; "
+                    f"border-radius:8px; padding:1.25rem 1.5rem;'>"
+                    f"<p style='color:#9CA3AF; font-size:0.75rem; text-transform:uppercase; "
+                    f"letter-spacing:0.08em; margin:0 0 0.5rem 0;'>AI Insight</p>"
+                    f"<p style='color:#F0F0F0; font-size:0.95rem; line-height:1.6; margin:0;'>"
+                    f"{st.session_state['insight']}</p></div>",
+                    unsafe_allow_html=True,
+                )
+
+            # ── Policy update display ─────────────────────────────────────
+            if "policy_change" in st.session_state:
+                pc  = st.session_state["policy_change"]
+                old = pc.get("old_rules", {})
+                new = pc.get("new_rules", {})
+
+                lev_old   = old.get("max_leverage")
+                lev_new   = new.get("max_leverage")
+                alloc_old = old.get("max_allocation_pct")
+                alloc_new = new.get("max_allocation_pct")
+
+                if lev_old is None or lev_new is None:
+                    lev_delta = f"— {lev_new}x" if lev_new is not None else "— unknown"
+                else:
+                    lev_old, lev_new = float(lev_old), float(lev_new)
+                    lev_delta = (f"▼ {lev_old}x → {lev_new}x" if lev_new < lev_old else
+                                 f"▲ {lev_old}x → {lev_new}x" if lev_new > lev_old else
+                                 f"— unchanged ({lev_new}x)")
+
+                if alloc_old is None or alloc_new is None:
+                    alloc_delta = f"— {alloc_new}%" if alloc_new is not None else "— unknown"
+                else:
+                    alloc_old, alloc_new = float(alloc_old), float(alloc_new)
+                    alloc_delta = (f"▼ {alloc_old}% → {alloc_new}%" if alloc_new < alloc_old else
+                                   f"▲ {alloc_old}% → {alloc_new}%" if alloc_new > alloc_old else
+                                   f"— unchanged ({alloc_new}%)")
+
+                with st.expander(
+                    f"📋 Policy rulebook updated — {pc.get('sector_key', 'sector')}",
+                    expanded=True,
+                ):
+                    col_l, col_r = st.columns(2)
+                    col_l.metric("Max Leverage",    lev_delta)
+                    col_r.metric("Max Allocation",  alloc_delta)
+                    if new.get("notes"):
+                        st.caption(f"**Reason:** {new['notes']}")
+
+            # ── Current rulebook ──────────────────────────────────────────
+            with st.expander("📖 View full policy rulebook (policy.json)", expanded=False):
+                st.json(load_policy())
