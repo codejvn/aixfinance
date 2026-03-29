@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "last_updated": "2026-03-29T22:35:48.261831+00:00",
+  "last_updated": "2026-03-29T22:44:08.613009+00:00",
   "sectors": {
     "AI": {
       "max_leverage": 4.0,
@@ -33,10 +33,10 @@
       "updated_reason": "No metrics triggered any adjustment; policy limits remain unchanged."
     },
     "Energy": {
-      "max_leverage": 3.0,
+      "max_leverage": 2.0,
       "max_allocation_pct": 40.0,
-      "notes": "Energy sector \u2014 macro-correlated, commodity risk. Initial default.",
-      "updated_reason": "Initial default"
+      "notes": "Max drawdown of -12.77% triggered two reduction rules: the <-8% rule (-0.5) and the <-15% rule (-1.0), stacking to a total reduction of 1.5 from the current 3.0x leverage.",
+      "updated_reason": "max_drawdown of -12.77% breached both the -8% and -15% thresholds, driving a combined 1.5x reduction in max_leverage"
     },
     "Biotech": {
       "max_leverage": 2.0,

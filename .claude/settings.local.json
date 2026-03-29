@@ -7,7 +7,9 @@
       "Bash(python -c \"import ast; ast.parse\\(open\\(''app.py'', encoding=''utf-8''\\).read\\(\\)\\); print\\(''OK''\\)\")",
       "Bash(streamlit run:*)",
       "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:8501)",
-      "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:8502)"
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:8502)",
+      "Bash(python make_deck.py)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\(''backtester.py'', encoding=''utf-8''\\).read\\(\\)\\); print\\(''OK''\\)\")"
     ]
   }
 }

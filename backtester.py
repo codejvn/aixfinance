@@ -39,145 +39,42 @@ def _mock_backtest_result() -> dict:
     }
 
 
-def _build_sentiment_signal(articles: list, date_index: pd.DatetimeIndex) -> pd.Series:
-    """
-    Build a daily sentiment signal from article published_dates.
-
-    For each trading day, only articles published ON OR BEFORE that day are used
-    (no look-ahead). The rolling signal is derived from the 5 most recent articles
-    available at that point.
-
-    Returns a Series indexed by date_index:
-        +1.0  = bullish  (LONG positions active at full leverage, SHORTs flat)
-        -1.0  = bearish  (SHORT positions active at full leverage, LONGs flat)
-         0.0  = neutral  (both directions active at half leverage)
-        NaN   = no articles yet (positions flat — no information, no trade)
-    """
-    # Parse article dates robustly — formats vary between Tavily and NewsAPI
-    events = []
-    for a in articles:
-        raw = a.get("published_date", "")
-        if not raw:
-            continue
-        try:
-            dt = pd.to_datetime(raw, utc=True).tz_localize(None).normalize()
-            events.append({"date": dt, "sentiment": a.get("sentiment", "neutral")})
-        except Exception:
-            continue
-
-    if not events:
-        # No dateable articles — return all-NaN (flat throughout)
-        return pd.Series(float("nan"), index=date_index)
-
-    events.sort(key=lambda x: x["date"])
-
-    signal = pd.Series(float("nan"), index=date_index)
-
-    for day in date_index:
-        day_ts = pd.Timestamp(day).normalize()
-        available = [e for e in events if e["date"] <= day_ts]
-        if not available:
-            continue  # no articles yet → stay NaN (flat)
-
-        # Rolling window: last 5 articles available at this point in time
-        recent   = available[-5:]
-        n_pos    = sum(1 for e in recent if e["sentiment"] == "positive")
-        n_neg    = sum(1 for e in recent if e["sentiment"] == "negative")
-
-        if n_pos > n_neg:
-            signal[day] = 1.0    # bullish signal
-        elif n_neg > n_pos:
-            signal[day] = -1.0   # bearish signal
-        else:
-            signal[day] = 0.0    # mixed / neutral
-
-    # Back-fill: news APIs only return recent articles (last 7 days), but the
-    # backtest window may be 90-180 days. Days before the first article are NaN
-    # (flat). We back-fill using the earliest available signal so the agent's
-    # thesis (formed from current news) is applied to the full historical window.
-    nan_before = int(signal.isna().sum())
-    signal = signal.bfill()
-    nan_after = int(signal.isna().sum())
-    if nan_before > nan_after:
-        print(
-            f"[Backtester] Back-filled {nan_before - nan_after} days before first article "
-            f"using earliest signal ({signal.iloc[0]:.0f})"
-        )
-
-    return signal
-
-
-def _position_multiplier(signal: float, direction: int) -> float:
-    """
-    Convert a sentiment signal into a position size multiplier [0, 1].
-
-    Rules:
-      LONG  (+1): full size when bullish, half size when neutral, flat when bearish
-      SHORT (-1): full size when bearish, half size when neutral, flat when bullish
-    No position at all when signal is NaN (no articles available yet).
-    """
-    if pd.isna(signal):
-        return 0.0
-    if direction == 1:   # LONG
-        if signal > 0:   return 1.0   # bullish → hold full
-        if signal == 0:  return 0.5   # neutral → half size
-        return 0.0                    # bearish → exit
-    else:                # SHORT
-        if signal < 0:   return 1.0   # bearish → hold full
-        if signal == 0:  return 0.5   # neutral → half size
-        return 0.0                    # bullish → exit
-
-
 def run_backtest(
     portfolio: list,
-    articles: list,
+    articles: list = None,       # kept for API compatibility — not used
     lookback_days: int = 90,
     initial_capital: float = INITIAL_CAPITAL,
 ) -> dict:
     """
-    Event-driven paper-trading simulation over historical price data.
+    Buy-and-hold simulation with per-position stop-losses.
 
-    Trading logic (no look-ahead):
-      - Positions are sized each day based on a rolling sentiment signal derived
-        exclusively from news articles published on or before that day.
-      - Days with no articles yet: position is flat (cash). The AI can't trade
-        on information it doesn't have.
-      - Days with a bullish signal: LONG positions are fully active.
-      - Days with a bearish signal: SHORT positions are fully active.
-      - Days with mixed/neutral signal: all positions run at 50% size.
-      - Stop-loss: if the underlying moves stop_loss_pct / leverage against the
-        entry price, the position is closed for the rest of the simulation
-        (perpetuals convention).
+    Logic:
+      - Enter every position on the first trading day of the window.
+      - Hold until stop-loss is triggered or the window ends.
+      - Stop-loss: if the underlying price moves (stop_loss_pct / leverage)
+        against the entry price, close the position — returns 0 thereafter.
+      - LONG daily P&L  = +daily_return * leverage * weight
+      - SHORT daily P&L = -daily_return * leverage * weight
 
     Args:
-        portfolio:       list of position dicts from agents.run_risk_analyst()
-                         fields: asset, direction, leverage, stop_loss_pct, allocation_pct
-        articles:        list of article dicts from context["news"]["articles"]
-                         each needs "published_date" and "sentiment" fields
-        lookback_days:   calendar days of history — should equal the user's
-                         selected investment horizon (30 / 90 / 180)
+        portfolio:      list of position dicts from run_risk_analyst()
+                        fields: asset, direction, leverage, stop_loss_pct, allocation_pct
+        articles:       ignored (kept for call-site compatibility)
+        lookback_days:  calendar days of history (30 / 90 / 180)
         initial_capital: starting portfolio value in USD
 
     Returns:
-        {
-          "equity_curve":     [{"date": str, "value": float}, ...],
-          "position_results": [{asset, direction, leverage, allocation_pct,
-                                total_return_pct, hit_stop_loss, stop_loss_day,
-                                days_active, days_flat}, ...],
-          "metrics": {total_return_pct, max_drawdown_pct, win_rate_pct,
-                      sharpe_ratio, initial_capital, final_capital, trading_days}
-        }
+        {equity_curve, position_results, metrics}
     """
     print(
-        f"[Backtester] Starting event-driven simulation | "
-        f"positions={len(portfolio)}, lookback={lookback_days}d, "
-        f"articles={len(articles)}"
+        f"[Backtester] Buy-and-hold simulation | "
+        f"positions={len(portfolio)}, lookback={lookback_days}d"
     )
 
     end   = datetime.utcnow()
     start = end - timedelta(days=lookback_days)
 
-    # ── Fetch close prices for each portfolio asset ────────────────────────
+    # ── Fetch close prices ─────────────────────────────────────────────────
     price_series = {}
     for pos in portfolio:
         raw    = pos.get("asset", "")
@@ -207,20 +104,6 @@ def run_backtest(
         print("[Backtester] Insufficient aligned data — returning mock result.")
         return _mock_backtest_result()
 
-    # ── Build daily sentiment signal (no look-ahead) ───────────────────────
-    sentiment_signal = _build_sentiment_signal(articles, prices_df.index)
-
-    active_days  = int((~sentiment_signal.isna()).sum())
-    bullish_days = int((sentiment_signal == 1.0).sum())
-    bearish_days = int((sentiment_signal == -1.0).sum())
-    neutral_days = int((sentiment_signal == 0.0).sum())
-    flat_days    = int(sentiment_signal.isna().sum())
-    print(
-        f"[Backtester] Signal breakdown over {len(prices_df)} trading days: "
-        f"bullish={bullish_days}, bearish={bearish_days}, "
-        f"neutral={neutral_days}, flat(no news)={flat_days}"
-    )
-
     # ── Simulate each position ─────────────────────────────────────────────
     position_returns = {}
     position_results = []
@@ -233,47 +116,42 @@ def run_backtest(
         weight    = float(pos.get("allocation_pct", 0)) / 100.0
 
         if asset not in prices_df.columns:
+            print(f"[Backtester] {asset} not in price data — skipping.")
             continue
 
         closes    = prices_df[asset]
         daily_ret = closes.pct_change().fillna(0)
 
-        # Position multiplier per day derived from the no-look-ahead sentiment signal
-        multipliers = sentiment_signal.apply(
-            lambda s: _position_multiplier(s, direction)
-        )
-
-        # Stop-loss: based on price movement from entry (first day of simulation).
-        # Entry price is the first close in the window — the trader enters at open
-        # on day 1 when news first informed the portfolio decision.
+        # Stop-loss threshold: underlying move = stop_loss_pct / leverage
         entry_price    = float(closes.iloc[0])
-        move_threshold = stop_pct / leverage  # underlying move that wipes stop_loss_pct of position
+        move_threshold = stop_pct / leverage
 
-        if direction == 1:
+        if direction == 1:   # LONG — stop if price falls too far
             stop_price = entry_price * (1 - move_threshold)
             triggered  = closes <= stop_price
-        else:
+        else:                # SHORT — stop if price rises too far
             stop_price = entry_price * (1 + move_threshold)
             triggered  = closes >= stop_price
 
         hit_stop = bool(triggered.any())
         stop_day = None
 
-        # Raw leveraged directional returns, scaled by daily sentiment multiplier
-        leveraged = daily_ret * direction * leverage * multipliers
+        # Leveraged directional daily returns
+        leveraged = daily_ret * direction * leverage * weight
 
         if hit_stop:
             stop_idx = triggered.idxmax()
             stop_day = str(stop_idx.date())
             leveraged          = leveraged.copy()
             leveraged[stop_idx:] = 0.0
-            print(f"[Backtester] {asset} stop-loss triggered on {stop_day}")
+            print(f"[Backtester] {asset} stop-loss triggered on {stop_day} "
+                  f"(entry={entry_price:.4f}, stop={stop_price:.4f})")
 
-        position_returns[asset] = leveraged * weight
+        position_returns[asset] = leveraged
 
-        total_ret  = round(float((1 + leveraged).prod() - 1) * 100, 2)
-        days_active = int((multipliers > 0).sum())
-        days_flat   = int((multipliers == 0).sum())
+        total_ret = round(float((1 + leveraged).prod() - 1) * 100, 2)
+        print(f"[Backtester] {asset}: direction={pos.get('direction','LONG')}, "
+              f"leverage={leverage}x, return={total_ret}%, stop={'YES' if hit_stop else 'no'}")
 
         position_results.append({
             "asset":            asset,
@@ -281,8 +159,6 @@ def run_backtest(
             "leverage":         leverage,
             "allocation_pct":   pos.get("allocation_pct", 0),
             "total_return_pct": total_ret,
-            "days_active":      days_active,
-            "days_flat":        days_flat,
             "hit_stop_loss":    hit_stop,
             "stop_loss_day":    stop_day,
         })
